@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>ETH/L2 Alpha Dashboard (Binance Source)</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0b10; --card: #12141d; --bd: #1e2230;
+            --text: #e2e4ea; --dim: #7a7d8e;
+            --up: #00f291; --down: #ff385c; --accent: #448aff;
+        }
+        body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; margin: 0; overflow-x: hidden; }
+        .header { padding: 20px 30px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--bd); }
+        .logo { font-size: 20px; font-weight: 800; background: linear-gradient(90deg, #448aff, #b388ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .grid { display: grid; grid-template-columns: 1fr 350px; gap: 20px; padding: 20px; }
+        .card { background: var(--card); border: 1px solid var(--bd); border-radius: 16px; padding: 20px; position: relative; }
+        .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-bottom: 20px; }
+        .stat-card { background: #1a1d29; padding: 15px; border-radius: 12px; border: 1px solid var(--bd); }
+        .label { font-size: 12px; color: var(--dim); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 1px; }
+        .value { font-family: 'JetBrains Mono'; font-size: 22px; font-weight: 700; }
+        #chart-container { height: 500px; width: 100%; margin-top: 10px; }
+        .token-list { display: flex; flex-direction: column; gap: 10px; }
+        .token-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; background: #1a1d29; border-radius: 8px; font-size: 14px; }
+        .badge { padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+        .badge-up { background: rgba(0,242,145,0.1); color: var(--up); }
+        .badge-down { background: rgba(255,56,92,0.1); color: var(--down); }
+        .loader { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--accent); font-family: 'JetBrains Mono'; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <div class="logo">Ξ ETH / L2 RELATIVE STRENGTH</div>
+    <div id="status" style="font-size: 12px; color: var(--dim);">Connecting to Binance...</div>
+</div>
+
+<div class="grid">
+    <div class="main-col">
+        <div class="stat-row">
+            <div class="stat-card">
+                <div class="label">ETH Price</div>
+                <div id="eth-price" class="value">---</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">L2 Basket Index</div>
+                <div id="l2-index" class="value">---</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Relative Ratio</div>
+                <div id="ratio-val" class="value">---</div>
+            </div>
+        </div>
+        
+        <div class="card" style="min-height: 550px;">
+            <div class="label">Relative Strength Index (ETH / Σ L2)</div>
+            <div id="chart-container"></div>
+            <div id="loading-msg" class="loader">Initializing Market Data...</div>
+        </div>
+    </div>
+
+    <div class="side-col">
+        <div class="card">
+            <div class="label" style="margin-bottom: 15px;">L2 Component Weakness</div>
+            <div id="token-list" class="token-list">
+                </div>
+        </div>
+
+        <div class="card" style="margin-top: 20px; background: linear-gradient(135deg, #1a1d29 0%, #0a0b10 100%);">
+            <div class="label">Strategy Signal</div>
+            <div id="strategy-signal" style="font-size: 18px; font-weight: 700; margin: 10px 0;">---</div>
+            <div id="strategy-desc" style="font-size: 13px; color: var(--dim); line-height: 1.5;">正在計算 Vitalik L1 擴容路線轉向後的相對價值偏差...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+/**
+ * 配置區：幣安交易對與權重
+ */
+const CONFIG = {
+    base: 'ETHUSDT',
+    l2s: [
+        { symbol: 'OPUSDT', weight: 0.25, name: 'Optimism' },
+        { symbol: 'ARBUSDT', weight: 0.25, name: 'Arbitrum' },
+        { symbol: 'POLUSDT', weight: 0.15, name: 'Polygon' },
+        { symbol: 'STRKUSDT', weight: 0.15, name: 'Starknet' },
+        { symbol: 'ZKUSDT', weight: 0.10, name: 'zkSync' },
+        { symbol: 'METISUSDT', weight: 0.10, name: 'Metis' }
+    ],
+    interval: '1h', // 可選 1h, 4h, 1d
+    limit: 500
+};
+
+let chart, lineSeries, emaSeries;
+
+/**
+ * 初始化圖表
+ */
+function initChart() {
+    chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+        layout: { background: { color: '#12141d' }, textColor: '#7a7d8e' },
+        grid: { vertLines: { color: '#1e2230' }, horzLines: { color: '#1e2230' } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        timeScale: { borderColor: '#1e2230', timeVisible: true },
+    });
+
+    lineSeries = chart.addAreaSeries({
+        lineColor: '#00f291',
+        topColor: 'rgba(0, 242, 145, 0.3)',
+        bottomColor: 'rgba(0, 242, 145, 0.0)',
+        lineWidth: 2,
+        title: 'Ratio'
+    });
+
+    emaSeries = chart.addLineSeries({
+        color: '#448aff',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        title: 'EMA 20'
+    });
+}
+
+/**
+ * 從幣安獲取 K 線數據
+ */
+async function fetchKlines(symbol) {
+    const resp = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${CONFIG.interval}&limit=${CONFIG.limit}`);
+    const data = await resp.json();
+    return data.map(d => ({
+        time: d[0] / 1000,
+        close: parseFloat(d[4])
+    }));
+}
+
+/**
+ * 核心計算邏輯
+ */
+async function updateData() {
+    try {
+        const ethData = await fetchKlines(CONFIG.base);
+        const l2Promises = CONFIG.l2s.map(async l2 => {
+            const klines = await fetchKlines(l2.symbol);
+            return { ...l2, klines };
+        });
+        const l2Results = await Promise.all(l2Promises);
+
+        // 對齊時間戳並計算比率
+        const ratioData = [];
+        const latestChanges = [];
+
+        ethData.forEach((eth, idx) => {
+            let basketValue = 0;
+            let totalWeight = 0;
+
+            l2Results.forEach(l2 => {
+                const l2K = l2.klines.find(k => k.time === eth.time);
+                if (l2K) {
+                    // 標準化處理：以第一根 K 線為基準 1.0
+                    const normEth = eth.close / ethData[0].close;
+                    const normL2 = l2K.close / l2.klines[0].close;
+                    basketValue += normL2 * l2.weight;
+                    totalWeight += l2.weight;
+                }
+            });
+
+            if (totalWeight > 0) {
+                const ratio = (eth.close / ethData[0].close) / (basketValue / totalWeight);
+                ratioData.push({ time: eth.time, value: ratio });
+            }
+        });
+
+        // 渲染圖表
+        lineSeries.setData(ratioData);
+        
+        // 計算簡單 EMA 作為參考
+        const emaData = calculateEMA(ratioData, 20);
+        emaSeries.setData(emaData);
+
+        // 更新 UI 數值
+        const latestRatio = ratioData[ratioData.length - 1].value;
+        const lastEthPrice = ethData[ethData.length - 1].close;
+        
+        document.getElementById('eth-price').innerText = `$${lastEthPrice.toLocaleString()}`;
+        document.getElementById('ratio-val').innerText = latestRatio.toFixed(4);
+        document.getElementById('loading-msg').style.display = 'none';
+
+        // 更新列表與信號
+        renderTokenList(l2Results);
+        updateSignal(latestRatio, emaData[emaData.length-1].value);
+
+    } catch (err) {
+        console.error(err);
+        document.getElementById('status').innerText = "Binance API Error";
+    }
+}
+
+function calculateEMA(data, period) {
+    let res = [];
+    let k = 2 / (period + 1);
+    let ema = data[0].value;
+    for (let i = 0; i < data.length; i++) {
+        ema = data[i].value * k + ema * (1 - k);
+        res.push({ time: data[i].time, value: ema });
+    }
+    return res;
+}
+
+function renderTokenList(results) {
+    const list = document.getElementById('token-list');
+    list.innerHTML = '';
+    
+    results.forEach(res => {
+        const last = res.klines[res.klines.length - 1].close;
+        const first = res.klines[res.klines.length - 24].close; // 24h change
+        const chg = ((last - first) / first * 100).toFixed(2);
+        
+        const item = document.createElement('div');
+        item.className = 'token-item';
+        item.innerHTML = `
+            <span>${res.symbol.replace('USDT','')}</span>
+            <span class="badge ${chg < 0 ? 'badge-down' : 'badge-up'}">${chg}%</span>
+        `;
+        list.appendChild(item);
+    });
+}
+
+function updateSignal(current, ema) {
+    const sig = document.getElementById('strategy-signal');
+    const desc = document.getElementById('strategy-desc');
+    
+    if (current > ema * 1.02) {
+        sig.innerText = "🟢 Long ETH / Short L2";
+        sig.style.color = "var(--up)";
+        desc.innerText = "ETH 強勢突破相對價值平均線，L1 擴容敘事正在發酵，建議執行配對交易。";
+    } else if (current < ema * 0.98) {
+        sig.innerText = "🔴 Wait / Neutral";
+        sig.style.color = "var(--down)";
+        desc.innerText = "L2 出現補漲或 ETH 走弱，目前比率處於均線下方，不建議在此處建立 Alpha 倉位。";
+    } else {
+        sig.innerText = "🟡 Mean Reverting";
+        sig.style.color = "var(--accent)";
+        desc.innerText = "比率正在均線附近震盪，等待明顯方向突破。";
+    }
+}
+
+// 啟動
+initChart();
+updateData();
+setInterval(updateData, 30000); // 每 30 秒更新一次
+</script>
+
+</body>
+</html>
